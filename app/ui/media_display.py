@@ -69,6 +69,9 @@ class MediaDisplayWidget(QWidget):
             return
 
         player = self._ensure_player()
+        player.setVideoOutput(self._video_widget)
+        self._video_widget.show()
+        self._video_widget.update()
         player.setSource(QUrl.fromLocalFile(str(path)))
         player.play()
         self._stack.setCurrentWidget(self._video_widget)
@@ -112,3 +115,6 @@ class MediaDisplayWidget(QWidget):
     def _stop_video(self) -> None:
         if self._player:
             self._player.stop()
+            self._player.setVideoOutput(None)
+        self._video_widget.hide()
+        self._video_widget.update()
