@@ -4,6 +4,7 @@ from typing import Iterable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -23,6 +24,11 @@ class HistoryPanel(QWidget):
         super().__init__(parent)
         self._conversations: list[Conversation] = []
 
+        self._mode_label = QLabel("", self)
+        self._mode_label.setObjectName("HistoryModeLabel")
+        self._mode_label.setWordWrap(True)
+        self._mode_label.setStyleSheet("font-weight: 600; font-size: 14px;")
+
         self._list = QListWidget(self)
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
 
@@ -34,12 +40,16 @@ class HistoryPanel(QWidget):
         self._favorite_button.setEnabled(False)
 
         layout = QVBoxLayout()
+        layout.addWidget(self._mode_label)
         layout.addWidget(self._new_button)
         layout.addWidget(self._favorite_button)
         layout.addWidget(self._list, stretch=1)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
         self.setLayout(layout)
+
+    def set_mode_label(self, label: str) -> None:
+        self._mode_label.setText(label)
 
     def set_conversations(self, conversations: Iterable[Conversation]) -> None:
         selected_id = self.current_conversation_id

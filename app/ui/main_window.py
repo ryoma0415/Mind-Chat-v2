@@ -4,13 +4,17 @@ from typing import Optional
 
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QVBoxLayout,
     QWidget,
 )
 
-from ..config import AppConfig
+from ..config import AppConfig, ConversationMode
 from ..history import FavoriteLimitError, HistoryError, HistoryManager
 from ..llm_client import LocalLLM
 from ..models import ChatMessage, Conversation
@@ -24,7 +28,19 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
 
         self._config = config
-        self._history = HistoryManager(config)
+        self._modes = {mode.key: mode for mode in config.modes}
+        if not self._modes:
+            raise ValueError("会話モードが設定されていません。")
+        if config.default_mode_key in self._modes:
+            self._active_mode_key = config.default_mode_key
+        else:
+            self._active_mode_key = next(iter(self._modes))
+
+        self._history_managers: dict[str, HistoryManager] = {
+            key: HistoryManager(config, history_file=mode.history_path(config.paths))
+            for key, mode in self._modes.items()
+        }
+        self._current_conversation_ids: dict[str, str | None] = {key: None for key in self._modes}
         self._llm_client: LocalLLM | None = None
         self._llm_error: str | None = None
 
@@ -33,15 +49,27 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pragma: no cover - runtime feedback
             self._llm_error = str(exc)
 
-        self._current_conversation_id: str | None = None
         self._worker_thread: QThread | None = None
         self._worker: LLMWorker | None = None
 
-        self.setWindowTitle("Mind-Chat - ローカル悩み相談")
         self.resize(1100, 700)
 
         self._history_panel = HistoryPanel(self)
+        self._history_panel.set_mode_label(self._active_mode.display_name)
         self._conversation_widget = ConversationWidget(self)
+        self._conversation_widget.set_assistant_label(self._active_mode.display_name)
+
+        self._mode_selector = QComboBox(self)
+        for mode in self._modes.values():
+            self._mode_selector.addItem(mode.display_name, mode.key)
+        self._sync_mode_selector()
+        self._mode_selector.currentIndexChanged.connect(self._handle_mode_change)
+
+        header_label = QLabel("会話モード:", self)
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(header_label)
+        header_layout.addWidget(self._mode_selector)
+        header_layout.addStretch()
 
         splitter = QSplitter(self)
         splitter.addWidget(self._history_panel)
@@ -50,48 +78,51 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([280, 820])
 
-        self.setCentralWidget(splitter)
+        container = QWidget(self)
+        container_layout = QVBoxLayout(container)
+        container_layout.addLayout(header_layout)
+        container_layout.addWidget(splitter, stretch=1)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+
+        self.setCentralWidget(container)
 
         self._history_panel.new_conversation_requested.connect(self._handle_new_conversation)
         self._history_panel.conversation_selected.connect(self._load_conversation)
         self._history_panel.favorite_toggle_requested.connect(self._toggle_favorite)
         self._conversation_widget.message_submitted.connect(self._handle_user_message)
 
+        self._apply_mode_theme(self._active_mode)
         self._bootstrap_conversation()
         if self._llm_error:
             self._show_warning("LLMの初期化に失敗しました", self._llm_error)
 
     # UI event handlers --------------------------------------------------
     def _bootstrap_conversation(self) -> None:
-        conversations = self._history.list_conversations()
-        if conversations:
-            self._current_conversation_id = conversations[0].conversation_id
-        else:
-            conversation = self._history.create_conversation()
-            conversations = [conversation]
-            self._current_conversation_id = conversation.conversation_id
-
-        self._history_panel.set_conversations(conversations)
-        if self._current_conversation_id:
-            self._load_conversation(self._current_conversation_id)
+        self._ensure_active_mode_ready()
+        conversation_id = self._get_active_conversation_id()
+        self._refresh_history_panel(select_id=conversation_id)
+        if conversation_id:
+            self._load_conversation(conversation_id)
 
     def _handle_new_conversation(self) -> None:
-        conversation = self._history.create_conversation()
-        self._current_conversation_id = conversation.conversation_id
+        conversation = self._active_history.create_conversation()
+        self._set_active_conversation_id(conversation.conversation_id)
         self._refresh_history_panel(select_id=conversation.conversation_id)
+        self._conversation_widget.display_conversation(conversation)
 
     def _load_conversation(self, conversation_id: str) -> None:
         try:
-            conversation = self._history.get_conversation(conversation_id)
+            conversation = self._active_history.get_conversation(conversation_id)
         except HistoryError as exc:
             self._show_warning("履歴の読み込みに失敗しました", str(exc))
             return
-        self._current_conversation_id = conversation.conversation_id
+        self._set_active_conversation_id(conversation.conversation_id)
         self._conversation_widget.display_conversation(conversation)
 
     def _toggle_favorite(self, conversation_id: str) -> None:
         try:
-            conversation = self._history.toggle_favorite(conversation_id)
+            conversation = self._active_history.toggle_favorite(conversation_id)
         except FavoriteLimitError as exc:
             self._show_warning("お気に入り制限", str(exc))
             return
@@ -101,22 +132,24 @@ class MainWindow(QMainWindow):
         self._refresh_history_panel(select_id=conversation.conversation_id)
 
     def _handle_user_message(self, text: str) -> None:
-        if not self._current_conversation_id:
+        conversation_id = self._get_active_conversation_id()
+        if not conversation_id:
             self._handle_new_conversation()
-        if not self._current_conversation_id:
+            conversation_id = self._get_active_conversation_id()
+        if not conversation_id:
             return
 
         message = ChatMessage(role="user", content=text)
-        conversation = self._history.append_message(self._current_conversation_id, message)
+        conversation = self._active_history.append_message(conversation_id, message)
         self._conversation_widget.append_message(message)
         self._refresh_history_panel(select_id=conversation.conversation_id)
-        self._conversation_widget.set_busy(True, "AIが考え中です...")
+        self._set_busy(True, "AIが考え中です...")
         self._request_llm_response(conversation)
 
     # LLM coordination ---------------------------------------------------
     def _request_llm_response(self, conversation: Conversation) -> None:
         if not self._llm_client:
-            self._conversation_widget.set_busy(False)
+            self._set_busy(False)
             self._show_warning(
                 "LLMが利用できません",
                 self._llm_error or "必要なライブラリやモデルファイルを確認してください。",
@@ -126,7 +159,11 @@ class MainWindow(QMainWindow):
         if self._worker_thread and self._worker_thread.isRunning():
             return
 
-        self._worker = LLMWorker(self._llm_client, conversation.messages)
+        self._worker = LLMWorker(
+            self._llm_client,
+            conversation.messages,
+            self._active_mode.system_prompt,
+        )
         self._worker_thread = QThread(self)
 
         self._worker.moveToThread(self._worker_thread)
@@ -144,21 +181,24 @@ class MainWindow(QMainWindow):
         self._worker_thread.start()
 
     def _handle_llm_success(self, response: str) -> None:
-        if not self._current_conversation_id:
-            self._conversation_widget.set_busy(False)
-            return
         assistant_message = ChatMessage(role="assistant", content=response)
-        conversation = self._history.append_message(self._current_conversation_id, assistant_message)
+        conversation_id = self._get_active_conversation_id()
+        if not conversation_id:
+            self._set_busy(False)
+            return
+        conversation = self._active_history.append_message(conversation_id, assistant_message)
         self._conversation_widget.append_message(assistant_message)
-        self._conversation_widget.set_busy(False)
+        self._set_active_conversation_id(conversation.conversation_id)
+        self._set_busy(False)
         self._refresh_history_panel(select_id=conversation.conversation_id)
 
     def _handle_llm_failure(self, error_message: str) -> None:
-        self._conversation_widget.set_busy(False)
-        if self._current_conversation_id:
-            conversation = self._history.remove_trailing_user_message(self._current_conversation_id)
+        conversation_id = self._get_active_conversation_id()
+        if conversation_id:
+            conversation = self._active_history.remove_trailing_user_message(conversation_id)
             self._conversation_widget.display_conversation(conversation)
             self._refresh_history_panel(select_id=conversation.conversation_id)
+        self._set_busy(False)
         self._show_warning("応答生成に失敗しました", error_message)
 
     def _cleanup_worker(self) -> None:
@@ -167,12 +207,100 @@ class MainWindow(QMainWindow):
 
     # Helpers ------------------------------------------------------------
     def _refresh_history_panel(self, select_id: Optional[str] = None) -> None:
-        conversations = self._history.list_conversations()
+        conversations = self._active_history.list_conversations()
         current_before = self._history_panel.current_conversation_id
         self._history_panel.set_conversations(conversations)
-        target_id = select_id or current_before
+        target_id = select_id or current_before or self._get_active_conversation_id()
         if target_id and self._history_panel.current_conversation_id != target_id:
             self._history_panel.select_conversation(target_id)
+        if target_id:
+            self._set_active_conversation_id(target_id)
+
+    def _set_busy(self, is_busy: bool, status_text: str | None = None) -> None:
+        self._conversation_widget.set_busy(is_busy, status_text)
+        self._history_panel.setDisabled(is_busy)
+        self._mode_selector.setDisabled(is_busy)
+
+    def _handle_mode_change(self, index: int) -> None:
+        mode_key = self._mode_selector.itemData(index)
+        if not mode_key or mode_key == self._active_mode_key:
+            return
+        self._active_mode_key = mode_key
+        self._history_panel.set_mode_label(self._active_mode.display_name)
+        self._conversation_widget.set_assistant_label(self._active_mode.display_name)
+        self._apply_mode_theme(self._active_mode)
+        self._ensure_active_mode_ready()
+        conversation_id = self._get_active_conversation_id()
+        self._refresh_history_panel(select_id=conversation_id)
+        if conversation_id:
+            self._load_conversation(conversation_id)
+
+    def _ensure_active_mode_ready(self) -> None:
+        if self._get_active_conversation_id():
+            return
+        conversations = self._active_history.list_conversations()
+        if conversations:
+            self._set_active_conversation_id(conversations[0].conversation_id)
+        else:
+            conversation = self._active_history.create_conversation()
+            self._set_active_conversation_id(conversation.conversation_id)
+
+    def _sync_mode_selector(self) -> None:
+        for index in range(self._mode_selector.count()):
+            if self._mode_selector.itemData(index) == self._active_mode_key:
+                self._mode_selector.blockSignals(True)
+                self._mode_selector.setCurrentIndex(index)
+                self._mode_selector.blockSignals(False)
+                break
+
+    def _get_active_conversation_id(self) -> str | None:
+        return self._current_conversation_ids[self._active_mode_key]
+
+    def _set_active_conversation_id(self, conversation_id: str | None) -> None:
+        self._current_conversation_ids[self._active_mode_key] = conversation_id
+
+    @property
+    def _active_mode(self) -> ConversationMode:
+        return self._modes[self._active_mode_key]
+
+    @property
+    def _active_history(self) -> HistoryManager:
+        return self._history_managers[self._active_mode_key]
+
+    def _apply_mode_theme(self, mode: ConversationMode) -> None:
+        theme = mode.theme
+        stylesheet = f"""
+        QWidget {{
+            background-color: {theme.base_background};
+            color: {theme.text};
+        }}
+        QTextEdit, QPlainTextEdit {{
+            background-color: {theme.panel_background};
+            border: 1px solid #d6d6d6;
+        }}
+        QListWidget {{
+            background-color: {theme.panel_background};
+            border: 1px solid #d6d6d6;
+        }}
+        QPushButton {{
+            background-color: {theme.accent};
+            color: {theme.accent_text};
+            border-radius: 4px;
+            padding: 6px 12px;
+        }}
+        QPushButton:disabled {{
+            background-color: #b4b4b4;
+            color: #f2f2f2;
+        }}
+        QPushButton:hover:!disabled {{
+            background-color: {theme.accent_hover};
+        }}
+        QLabel#StatusLabel {{
+            color: {theme.subtle_text};
+        }}
+        """
+        self.setStyleSheet(stylesheet)
+        self.setWindowTitle(mode.window_title)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._worker_thread and self._worker_thread.isRunning():

@@ -24,11 +24,43 @@ class AppPaths:
         if not self.history_file.exists():
             self.history_file.write_text("[]", encoding="utf-8")
 
+    def ensure_history_file(self, filename: str) -> Path:
+        path = (self.data_dir / filename).resolve()
+        if not path.exists():
+            path.write_text("[]", encoding="utf-8")
+        return path
+
     def resolve_model_path(self, default_filename: str) -> Path:
         override = os.getenv("MINDCHAT_MODEL_PATH")
         if override:
             return Path(override).expanduser().resolve()
         return (self.model_dir / default_filename).resolve()
+
+
+@dataclass(frozen=True)
+class ModeTheme:
+    """Represents a simple color palette per conversation mode."""
+
+    base_background: str
+    panel_background: str
+    accent: str
+    accent_hover: str
+    accent_text: str
+    text: str = "#1a1a1a"
+    subtle_text: str = "#666666"
+
+
+@dataclass(frozen=True)
+class ConversationMode:
+    key: str
+    display_name: str
+    history_filename: str
+    window_title: str
+    theme: ModeTheme
+    system_prompt: str | None = None
+
+    def history_path(self, paths: AppPaths) -> Path:
+        return paths.ensure_history_file(self.history_filename)
 
 
 @dataclass(frozen=True)
@@ -53,7 +85,56 @@ class AppConfig:
     top_p: float = 0.9
     gpu_layers: int = 0
     threads: int | None = None
+    default_mode_key: str = "mind_chat"
+    modes: tuple[ConversationMode, ...] = field(init=False)
 
     @property
     def model_path(self) -> Path:
         return self.paths.resolve_model_path(self.model_filename)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "modes", self._build_modes())
+
+    def _build_modes(self) -> tuple[ConversationMode, ...]:
+        mind_theme = ModeTheme(
+            base_background="#f1f7f3",
+            panel_background="#ffffff",
+            accent="#2f8f63",
+            accent_hover="#267650",
+            accent_text="#ffffff",
+        )
+        plain_theme = ModeTheme(
+            base_background="#eef4fb",
+            panel_background="#ffffff",
+            accent="#256edc",
+            accent_hover="#1d58b0",
+            accent_text="#ffffff",
+        )
+        return (
+            ConversationMode(
+                key="mind_chat",
+                display_name="Mind-Chat",
+                history_filename="history_mindchat.json",
+                window_title="Mind-Chat - カウンセリングモード",
+                theme=mind_theme,
+                system_prompt=self.system_prompt,
+            ),
+            ConversationMode(
+                key="plain_chat",
+                display_name="通常会話",
+                history_filename="history_plain.json",
+                window_title="Mind-Chat - 通常会話モード",
+                theme=plain_theme,
+                system_prompt=None,
+            ),
+        )
+
+    def get_mode(self, key: str) -> ConversationMode:
+        for mode in self.modes:
+            if mode.key == key:
+                return mode
+        raise KeyError(f"Unknown mode: {key}")
+
+    @property
+    def default_mode(self) -> ConversationMode:
+        return self.get_mode(self.default_mode_key)

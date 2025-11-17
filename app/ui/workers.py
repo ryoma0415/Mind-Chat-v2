@@ -12,15 +12,16 @@ class LLMWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, client: LocalLLM, messages: Iterable[ChatMessage]) -> None:
+    def __init__(self, client: LocalLLM, messages: Iterable[ChatMessage], system_prompt: str | None) -> None:
         super().__init__()
         self._client = client
         self._messages = list(messages)
+        self._system_prompt = system_prompt
 
     @Slot()
     def run(self) -> None:
         try:
-            response = self._client.generate_reply(self._messages)
+            response = self._client.generate_reply(self._messages, self._system_prompt)
         except Exception as exc:  # pragma: no cover - runtime safety
             self.failed.emit(str(exc))
             return

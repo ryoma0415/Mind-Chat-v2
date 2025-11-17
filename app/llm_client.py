@@ -31,9 +31,9 @@ class LocalLLM:
         self._llama: Llama | None = None
         self._lock = threading.Lock()
 
-    def generate_reply(self, history: Iterable[ChatMessage]) -> str:
+    def generate_reply(self, history: Iterable[ChatMessage], system_prompt: str | None) -> str:
         llama = self._ensure_model()
-        chat_messages = self._build_prompt(history)
+        chat_messages = self._build_prompt(history, system_prompt)
         with self._lock:
             completion = llama.create_chat_completion(
                 messages=chat_messages,
@@ -70,28 +70,42 @@ class LocalLLM:
             )
         return self._llama
 
-    def _build_prompt(self, history: Iterable[ChatMessage]) -> List[dict]:
+    def _build_prompt(self, history: Iterable[ChatMessage], system_prompt: str | None) -> List[dict]:
         """
         Gemma 2 2B Japanese IT の chat template は system ロールをサポートしないため、
         最初の user メッセージにシステムプロンプトを結合して渡す。
+        システムプロンプトを利用しないモードでは history だけをそのまま渡す。
         """
         messages = self._normalize_messages(list(history))
         chat_messages: List[dict] = []
 
-        if not messages:
-            chat_messages.append({"role": "user", "content": self._config.system_prompt})
+        if system_prompt:
+            if not messages:
+                chat_messages.append({"role": "user", "content": system_prompt})
+                return chat_messages
+
+            first = messages[0]
+            start_index = 0
+            if first.role == "user":
+                combined = f"{system_prompt}\n\n{first.content}".strip()
+                chat_messages.append({"role": "user", "content": combined})
+                start_index = 1
+            else:
+                chat_messages.append({"role": "user", "content": system_prompt})
+
+            for message in messages[start_index:]:
+                chat_messages.append(
+                    {
+                        "role": message.role,
+                        "content": message.content,
+                    }
+                )
             return chat_messages
 
-        first = messages[0]
-        start_index = 0
-        if first.role == "user":
-            combined = f"{self._config.system_prompt}\n\n{first.content}".strip()
-            chat_messages.append({"role": "user", "content": combined})
-            start_index = 1
-        else:
-            chat_messages.append({"role": "user", "content": self._config.system_prompt})
+        if not messages:
+            return chat_messages
 
-        for message in messages[start_index:]:
+        for message in messages:
             chat_messages.append(
                 {
                     "role": message.role,

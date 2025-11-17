@@ -24,6 +24,7 @@ class ConversationWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._current_conversation: Conversation | None = None
+        self._assistant_label = "Mind-Chat"
 
         self._welcome_label = QLabel(
             "こんにちは, 本日はどうされましたか？ 気楽に話していってくださいね。",
@@ -36,6 +37,7 @@ class ConversationWidget(QWidget):
         self._transcript.setMinimumHeight(300)
 
         self._status_label = QLabel("", self)
+        self._status_label.setObjectName("StatusLabel")
         self._status_label.setStyleSheet("color: #666666;")
 
         self._input = QPlainTextEdit(self)
@@ -81,6 +83,14 @@ class ConversationWidget(QWidget):
         elif not is_busy:
             self._status_label.clear()
 
+    def set_assistant_label(self, label: str) -> None:
+        normalized = (label or "Mind-Chat").strip() or "Mind-Chat"
+        if normalized == self._assistant_label:
+            return
+        self._assistant_label = normalized
+        if self._current_conversation:
+            self._render_messages(self._current_conversation.messages)
+
     # Internal helpers ---------------------------------------------------
     def _handle_submit(self) -> None:
         text = self._input.toPlainText().strip()
@@ -97,6 +107,6 @@ class ConversationWidget(QWidget):
         self._transcript.moveCursor(QTextCursor.End)
 
     def _format_message(self, message: ChatMessage) -> str:
-        role_label = "あなた" if message.role == "user" else "Mind-Chat"
+        role_label = "あなた" if message.role == "user" else self._assistant_label
         escaped = html.escape(message.content).replace("\n", "<br>")
         return f"<p><b>{role_label}</b><br>{escaped}</p>"

@@ -26,9 +26,12 @@ class HistoryManager:
     Manages persistence and business rules around conversation history.
     """
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, history_file: Path | None = None):
         self._config = config
-        self._path: Path = config.paths.history_file
+        self._path: Path = history_file or config.paths.history_file
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._path.exists():
+            self._path.write_text("[]", encoding="utf-8")
         self._conversations: list[Conversation] = []
         self._load_from_disk()
 
